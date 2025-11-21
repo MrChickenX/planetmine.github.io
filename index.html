@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Remote Page Viewer (fetch + iframe fallback)</title>
+  <style>
+    :root{--ui-height:64px;--pad:12px}
+    html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Arial,sans-serif;color:#111}
+    .topbar{
+      height:var(--ui-height);
+      display:flex;
+      gap:8px;
+      align-items:center;
+      padding:0 var(--pad);
+      background:#f4f4f7;
+      box-shadow:0 1px 0 rgba(0,0,0,0.06);
+      position:sticky;top:0;z-index:30;
+    }
+    input[type="url"]{
+      flex:1; padding:10px 12px; border:1px solid #d0d0d6; border-radius:8px; font-size:15px;
+    }
+    button{padding:10px 14px;border-radius:8px;border:1px solid #cfcfe6;background:white;cursor:pointer}
+    button:active{transform:translateY(1px)}
+    main{height:calc(100% - var(--ui-height)); display:flex; flex-direction:column;}
+    #status{padding:8px var(--pad); font-size:14px; background:#fff8dc; color:#5a3b00}
+    #viewerWrap{flex:1; display:flex; gap:8px; padding:var(--pad); box-sizing:border-box;}
+    #remote{flex:1; border:1px solid #e0e0e8; border-radius:8px; overflow:auto; padding:12px; background:white}
+    iframe#frameFallback{flex:1; border:1px solid #e0e0e8; border-radius:8px; display:none}
+    .cols{display:flex;gap:8px;flex:1}
+    @media (max-width:900px){ #viewerWrap{padding:10px} .topbar{height:56px} }
+    small.note{display:block;margin-top:6px;color:#555}
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <input id="urlInput" type="url" placeholder="https://example.com — URL eingeben und Enter" autocomplete="off" />
+    <button id="goBtn">Laden</button>
+    <button id="clearBtn" title="Ausgabe leeren">Leeren</button>
+  </div>
+
+  <main>
+    <div id="status">Gib eine URL ein und druecke "Laden".</div>
+    <div id="viewerWrap">
+      <div id="remote" aria-live="polite"></div>
+      <iframe id="frameFallback" sandbox="allow-forms allow-same-origin allow-scripts"></iframe>
+    </div>
+    <div style="padding:10px var(--pad);font-size:13px;color:#444">
+      <strong>Hinweis:</strong> Scripts aus der entfernten Seite werden aus Sicherheitsgruenden NICHT ausgefuehrt, externe CSS und Bilder sollten jedoch laden. Wenn eine Seite stark JS-abhängig ist, funktioniert die Darstellung eventuell nicht korrekt. Fuer ein echtes Proxy-Verhalten benoetigst du einen Server/Worker (z.B. Cloudflare Worker oder GitHub Action Snapshot).
+    </div>
+  </main>
+
+  <script>
+    const input = document.getElementById('urlInput');
+    const goBtn = document.getElementById('goBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const status = document.getElementById('status');
+    const remote = document.getElementById('remote');
+    const frame = document.getElementById('frameFallback');
+
+    function normalizeUrl(u){
+      try {
+        // If no scheme, assume https
+        if (!/^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(u)) u = 'https://' + u;
+        return new URL(u).toString();
+      } catch(e){
+        return null;
+      }
+    }
+
+    async function loadUrl(raw){
+      const url = normalizeUrl(raw);
+      if(!url){ status.textContent = 'Ungültige URL.'; return; }
+
+      status.textContent = 'Versuche fetch() vom Server...';
+      remote.innerHTML = '';
+      frame.style.display = 'none';
+      frame.src = 'about:blank';
+
+      try {
+        const resp = await fetch(url, { method: 'GET', mode: 'cors' }); // CORS erforderlich
+        if (!resp.ok) throw new Error('Netzwerkfehler: ' + resp.status + ' ' + resp.statusText);
+        const text = await resp.text();
+
+        // Parse HTML, set <base> damit relative Links funktionieren, entfernen Scripts
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(text, 'text/html');
+
+        // Entferne alle script-Elemente (Sicherheit: keine Scripts ausfuehren)
+        doc.querySelectorAll('script').forEach(s => s.remove());
+
+        // Fuege oder ersetze <base> damit relative Links (css/img) korrekt aufgeloest werden
+        let base = doc.querySelector('base');
+        if(!base){
+          base = doc.createElement('base');
+          doc.head.prepend(base);
+        }
+        base.setAttribute('href', url);
+
+        // Optional: relativ referenzierte tags (href/src) korrigieren — base sollte genuegen.
+        // Manche Browser brauchen den HTML als String -> serialisieren:
+        const serializer = new XMLSerializer();
+        const serialized = serializer.serializeToString(doc);
+
+        // Set innerHTML (externe CSS/img mit base sollten laden)
+        remote.innerHTML = serialized;
+        status.textContent = 'Inhalt geladen (fetch). Scripts wurden entfernt — interaktive Teile koennen fehlen.';
+      } catch (fetchErr) {
+        // Möglicher CORS- oder Netzwerkfehler -> iframe-Fallback versuchen
+        console.warn('fetch failed:', fetchErr);
+        status.textContent = 'fetch() fehlgeschlagen (wahrscheinlich CORS). Versuche iframe-Fallback...';
+        try {
+          frame.style.display = 'block';
+          frame.src = url;
+          remote.innerHTML = '<p style="color:#666">iframe Fallback: Wenn die Seite Einbettung blockiert, wird sie nicht angezeigt.</p>';
+          status.textContent = 'iframe gesetzt — wenn die Seite Einbettung verbietet, erscheint ein Fehler oder leere Seite.';
+        } catch(e){
+          remote.textContent = 'Fallback fehlgeschlagen: ' + e;
+          status.textContent = 'Fehler beim Laden im iframe.';
+        }
+      }
+    }
+
+    goBtn.addEventListener('click', ()=> loadUrl(input.value));
+    input.addEventListener('keydown', (e)=>{
+      if(e.key === 'Enter') { e.preventDefault(); loadUrl(input.value); }
+    });
+    clearBtn.addEventListener('click', ()=>{
+      input.value = '';
+      remote.innerHTML = '';
+      frame.src = 'about:blank';
+      frame.style.display = 'none';
+      status.textContent = 'Ausgabe geleert.';
+    });
+
+    // Demo: falls du sofort testen willst, setze eine Default-URL
+    // input.value = 'https://example.com';
+    // loadUrl(input.value);
+  </script>
+</body>
+</html>
